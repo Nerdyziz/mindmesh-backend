@@ -11,7 +11,17 @@ const ai = new GoogleGenAI({
     apiKey: process.env.API_KEY,
 });
 
-const httpServer = createServer();
+const httpServer = createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+    return;
+  }
+
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("MindMesh Socket Server Running");
+});
+
 
 const io = new Server(httpServer, {
   cors: {
