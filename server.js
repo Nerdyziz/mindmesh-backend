@@ -133,7 +133,7 @@ ${text.replace("@ai", "").trim()}
       });
 
       const aiReply =
-        response.output?.[0]?.content?.[0]?.text ||
+        response.output_text ||
         "⚠️ AI did not return a response.";
 
       const aiMessage = { sender: "AI 🤖", text: aiReply };
