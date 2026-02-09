@@ -1,16 +1,21 @@
 import { createServer } from "http";
 import { Server } from "socket.io";
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
 
+/* -------------------- ENV SETUP -------------------- */
 dotenv.config();
 
+const PORT = process.env.PORT || 3001;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:3000";
 
-// ✅ Initialize Gemini (LATEST SDK)
-const ai = new GoogleGenAI({
-    apiKey: process.env.API_KEY,
+/* -------------------- AI CLIENT (GROQ) -------------------- */
+const aiClient = new OpenAI({
+  apiKey: process.env.API_KEY,
+  baseURL: "https://api.groq.com/openai/v1",
 });
 
+/* -------------------- HTTP SERVER -------------------- */
 const httpServer = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -22,82 +27,77 @@ const httpServer = createServer((req, res) => {
   res.end("MindMesh Socket Server Running");
 });
 
-
+/* -------------------- SOCKET.IO -------------------- */
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+    origin: CORS_ORIGIN,
     methods: ["GET", "POST"],
   },
 });
 
-// In-memory room store
-const rooms = new Map();
 /*
 rooms = {
-  roomid: {
-    users: number,
-    messages: [{ sender, text }]
+  roomId: {
+    users: Map<username, socketId>,
+    messages: [{ sender, text }],
+    leaveTimers: Map<username, timeout>
   }
 }
 */
+const rooms = new Map();
 
+/* -------------------- SOCKET EVENTS -------------------- */
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
+
+  /* -------- CREATE ROOM -------- */
   socket.on("create-room", ({ roomid }) => {
-  if (rooms.has(roomid)) return;
+    if (rooms.has(roomid)) return;
 
-  rooms.set(roomid, {
-    users: new Map(),
-    messages: [],
-    leaveTimers: new Map(),
+    rooms.set(roomid, {
+      users: new Map(),
+      messages: [],
+      leaveTimers: new Map(),
+    });
+
+    socket.emit("room-created");
   });
-  socket.emit("room-created");
-});
 
-  
+  /* -------- JOIN ROOM -------- */
+  socket.on("join-room", ({ roomid, username }) => {
+    if (!rooms.has(roomid)) {
+      socket.emit("room-not-found");
+      return;
+    }
 
- socket.on("join-room", ({ roomid, username }) => {
-  
+    const room = rooms.get(roomid);
+    const isRejoin = room.leaveTimers.has(username);
 
-  if (!rooms.has(roomid)) {
-  socket.emit("room-not-found");
-  return;
-}
+    if (isRejoin) {
+      clearTimeout(room.leaveTimers.get(username));
+      room.leaveTimers.delete(username);
+    }
 
-   const room = rooms.get(roomid);
-   if (room.leaveTimers.has(username)) {
-    clearTimeout(room.leaveTimers.get(username));
-    room.leaveTimers.delete(username);
-  }
+    socket.join(roomid);
 
-  socket.join(roomid);
+    room.users.set(username, socket.id);
+    socket.data.roomid = roomid;
+    socket.data.username = username;
 
- 
- console.log(`User ${username} joined room ${roomid}`);
+    socket.emit("room-history", room.messages);
 
-  const isRejoin = room.leaveTimers.has(username);
+    if (!isRejoin) {
+      socket.to(roomid).emit("receive-message", {
+        sender: "System",
+        text: `${username} joined the room`,
+      });
+    }
 
-  // cancel pending leave
- 
-
-  room.users.set(username, socket.id);
-
-
-  socket.data.roomid = roomid;
-  socket.data.username = username;
-
-socket.emit("room-history", room.messages);
- console.log("Total connections:", room.users.size);
-
-// ✅ notify ONLY if truly new
-
-  socket.to(roomid).emit("receive-message", {
-    sender: "System",
-    text: `${username} joined the room`,
+    console.log(`User ${username} joined room ${roomid}`);
   });
-});
 
-socket.on("send-message", async ({ roomid, sender, text }) => {
+  /* -------- SEND MESSAGE -------- */
+  socket.on("send-message", async ({ roomid, sender, text }) => {
     if (!rooms.has(roomid)) return;
 
     const room = rooms.get(roomid);
@@ -108,91 +108,76 @@ socket.on("send-message", async ({ roomid, sender, text }) => {
 
     io.to(roomid).emit("receive-message", message);
 
-    // 🤖 AI Trigger
-    if (text.toLowerCase().includes("@ai")) {
-      try {
-        const historyText = room.messages
-          .map((m) => `${m.sender}: ${m.text}`)
-          .join("\n");
+    /* -------- AI TRIGGER -------- */
+    if (!text.toLowerCase().includes("@ai")) return;
 
-        const prompt = `
+    try {
+      const historyText = room.messages
+        .map((m) => `${m.sender}: ${m.text}`)
+        .join("\n");
+
+      const prompt = `
 You are an AI assistant inside an anonymous group chat.
-Be helpful, concise, and friendly.
-Answer using the conversation context.
+Be concise, friendly, and helpful.
 
 Conversation:
 ${historyText}
 
 Question:
 ${text.replace("@ai", "").trim()}
-        `;
+      `;
 
-        const response = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: prompt,
-        });
+      const response = await aiClient.responses.create({
+        model: "openai/gpt-oss-20b",
+        input: prompt,
+      });
 
-        const aiReply = response.text;
-        room.messages.push({ sender: "AI 🤖", text: aiReply });
+      const aiReply =
+        response.output?.[0]?.content?.[0]?.text ||
+        "⚠️ AI did not return a response.";
 
-        io.to(roomid).emit("receive-message", {
-          sender: "AI 🤖",
-          text: aiReply,
-        });
-      } catch (error) {
-        console.error("Gemini error:", error);
-        io.to(roomid).emit("receive-message", {
-          sender: "AI 🤖",
-          text: "⚠️ AI is temporarily unavailable.",
-        });
-      }
-  }
-});
-socket.on("disconnecting", () => {
-  
-  const { roomid, username } = socket.data;
+      const aiMessage = { sender: "AI 🤖", text: aiReply };
 
-  console.log(`User ${username} is leaving room ${roomid}`);
-  if (!roomid || !rooms.has(roomid)) return;
+      room.messages.push(aiMessage);
+      if (room.messages.length > 20) room.messages.shift();
 
-  const room = rooms.get(roomid);
-
- 
-
-  const timer = setTimeout(() => {
-    
-  console.log(`User ${username} left room ${roomid}`);
-
-  room.users.delete(username);
-  room.leaveTimers.delete(username);
-
-  io.to(roomid).emit("receive-message", {
-    sender: "System",
-    text: `${username} left the room`,
+      io.to(roomid).emit("receive-message", aiMessage);
+    } catch (error) {
+      console.error("AI error:", error);
+      io.to(roomid).emit("receive-message", {
+        sender: "AI 🤖",
+        text: "⚠️ AI is temporarily unavailable.",
+      });
+    }
   });
 
-  if (room.users.size === 0) {
-    rooms.delete(roomid);
-    console.log(`Room ${roomid} deleted`);
-    socket.leave(roomid);
-  }
-}, 5000);
+  /* -------- DISCONNECT -------- */
+  socket.on("disconnecting", () => {
+    const { roomid, username } = socket.data;
+    if (!roomid || !username || !rooms.has(roomid)) return;
 
+    const room = rooms.get(roomid);
 
+    const timer = setTimeout(() => {
+      room.users.delete(username);
+      room.leaveTimers.delete(username);
 
-  room.leaveTimers.set(username, timer);
+      io.to(roomid).emit("receive-message", {
+        sender: "System",
+        text: `${username} left the room`,
+      });
+
+      if (room.users.size === 0) {
+        rooms.delete(roomid);
+        console.log(`Room ${roomid} deleted`);
+      }
+    }, 5000);
+
+    room.leaveTimers.set(username, timer);
+  });
 });
 
-
-
-
-
-
-});
-
-
-
-const PORT = process.env.PORT || 3001;
+/* -------------------- START SERVER -------------------- */
 httpServer.listen(PORT, () => {
-  console.log(`Socket.IO server running on port ${PORT}`);
+  console.log(`🚀 MindMesh Socket.IO server running on port ${PORT}`);
 });
