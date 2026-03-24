@@ -109,7 +109,8 @@ io.on("connection", (socket) => {
     io.to(roomid).emit("receive-message", message);
 
     /* -------- AI TRIGGER -------- */
-    if (!text.toLowerCase().includes("@ai")) return;
+        /* -------- AI TRIGGER -------- */
+    if (!text?.toLowerCase().includes("@ai")) return;
 
     try {
       const historyText = room.messages
@@ -127,13 +128,14 @@ Question:
 ${text.replace("@ai", "").trim()}
       `;
 
-      const response = await aiClient.responses.create({
-        model: "openai/gpt-oss-20b",
-        input: prompt,
+      // FIXED: using chat.completions.create and messages array
+      const response = await aiClient.chat.completions.create({
+        model: "llama3-8b-8192", // Use a valid Groq model here
+        messages: [{ role: "user", content: prompt }],
       });
 
       const aiReply =
-        response.choices[0].message.content ||
+        response.choices[0]?.message?.content ||
         "⚠️ AI did not return a response.";
 
       const aiMessage = { sender: "AI 🤖", text: aiReply };
