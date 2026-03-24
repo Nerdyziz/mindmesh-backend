@@ -130,7 +130,7 @@ ${text.replace("@ai", "").trim()}
 
       // FIXED: using chat.completions.create and messages array
       const response = await aiClient.chat.completions.create({
-        model: "llama3-8b-8192", // Use a valid Groq model here
+        model: "openai/gpt-oss-20b", // Use a valid Groq model here
         messages: [{ role: "user", content: prompt }],
       });
 
